@@ -7,6 +7,7 @@ import ast
 import subprocess
 import tempfile
 import shutil
+import urllib.request
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -97,6 +98,7 @@ class RepoAnalyzer:
         exclude_files: set[str] | None = None
     ):
         self.original_path = repo_path
+        self.is_github = 'github.com' in repo_path
         self.is_remote = self._is_git_url(repo_path)
         self.temp_dir: str | None = None
         self.exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
@@ -113,10 +115,87 @@ class RepoAnalyzer:
             'bitbucket.org' in path
         )
     
+    def _parse_github_url(self, url: str) -> tuple[str, str, str]:
+        """GitHub URL에서 owner, repo, branch 추출"""
+        # https://github.com/owner/repo/tree/branch
+        # https://github.com/owner/repo
+        url = url.replace('.git', '')
+        parts = url.split('github.com/')[-1].split('/')
+        owner = parts[0]
+        repo = parts[1]
+        branch = 'main'
+        if len(parts) > 3 and parts[2] == 'tree':
+            branch = parts[3]
+        return owner, repo, branch
+    
+    def _fetch_github_files(self) -> list[tuple[str, str]]:
+        """GitHub API로 Python 파일 목록과 내용 가져오기"""
+        owner, repo, branch = self._parse_github_url(self.original_path)
+        
+        # 파일 트리 가져오기
+        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
+        with urllib.request.urlopen(tree_url) as response:
+            tree_data = json.loads(response.read().decode())
+        
+        files = []
+        for item in tree_data.get('tree', []):
+            if item['type'] != 'blob':
+                continue
+            path = item['path']
+            if not path.endswith('.py'):
+                continue
+            if self._should_skip_path(path):
+                continue
+            
+            # 파일 내용 가져오기
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+            with urllib.request.urlopen(raw_url) as response:
+                content = response.read().decode('utf-8')
+            files.append((path, content))
+        
+        return files
+    
+    def _should_skip_path(self, path: str) -> bool:
+        """경로 문자열로 스킵 여부 확인"""
+        parts = path.split('/')
+        for part in parts:
+            if part in self.exclude_dirs:
+                return True
+        filename = parts[-1]
+        if filename in self.exclude_files:
+            return True
+        return False
+    
+    def _normalize_git_url(self, url: str) -> str:
+        """브라우저 URL을 git clone 가능한 URL로 변환"""
+        if 'github.com' in url:
+            parts = url.split('github.com/')[-1].split('/')
+            if len(parts) >= 2:
+                user, repo = parts[0], parts[1]
+                repo = repo.replace('.git', '')
+                return f"https://github.com/{user}/{repo}.git"
+        
+        if 'gitlab.com' in url:
+            parts = url.split('gitlab.com/')[-1].split('/')
+            if len(parts) >= 2:
+                user, repo = parts[0], parts[1]
+                repo = repo.replace('.git', '')
+                return f"https://gitlab.com/{user}/{repo}.git"
+        
+        if 'bitbucket.org' in url:
+            parts = url.split('bitbucket.org/')[-1].split('/')
+            if len(parts) >= 2:
+                user, repo = parts[0], parts[1]
+                repo = repo.replace('.git', '')
+                return f"https://bitbucket.org/{user}/{repo}.git"
+        
+        return url
+    
     def _clone_repo(self, url: str) -> Path:
         self.temp_dir = tempfile.mkdtemp()
+        normalized_url = self._normalize_git_url(url)
         subprocess.run(
-            ['git', 'clone', '--depth', '1', url, self.temp_dir],
+            ['git', 'clone', '--depth', '1', normalized_url, self.temp_dir],
             check=True,
             capture_output=True
         )
@@ -127,13 +206,42 @@ class RepoAnalyzer:
             shutil.rmtree(self.temp_dir)
     
     def analyze(self) -> AnalysisResult:
+        result = AnalysisResult(repo_path=self.original_path)
+        
+        # GitHub URL이면 API로 처리
+        if self.is_github:
+            return self._analyze_github(result)
+        
+        # 그 외 원격이면 clone
         if self.is_remote:
             self.root = self._clone_repo(self.original_path)
         else:
             self.root = Path(self.original_path).resolve()
         
-        result = AnalysisResult(repo_path=self.original_path)
+        return self._analyze_local(result)
+    
+    def _analyze_github(self, result: AnalysisResult) -> AnalysisResult:
+        """GitHub API로 분석"""
+        files = self._fetch_github_files()
         
+        for path, content in files:
+            compile(content, path, 'exec', ast.PyCF_ONLY_AST)
+            
+            tree = ast.parse(content)
+            detector = UnusedImportDetector()
+            detector.visit(tree)
+            
+            for name, line in detector.get_unused():
+                result.unused_imports.append(
+                    UnusedImport(file=path, line=line, module=name)
+                )
+            
+            result.files_analyzed += 1
+        
+        return result
+    
+    def _analyze_local(self, result: AnalysisResult) -> AnalysisResult:
+        """로컬 파일 시스템에서 분석"""
         for py_file in self.root.rglob('*.py'):
             if self._should_skip(py_file):
                 result.files_skipped += 1
