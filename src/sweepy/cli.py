@@ -171,26 +171,6 @@ class RepoAnalyzer:
         
         return self._analyze_local(result)
     
-    def _analyze_github(self, result: AnalysisResult) -> AnalysisResult:
-        """GitHub API로 분석"""
-        files = self._fetch_github_files()
-        
-        for path, content in files:
-            compile(content, path, 'exec', ast.PyCF_ONLY_AST)
-            
-            tree = ast.parse(content)
-            detector = UnusedImportDetector()
-            detector.visit(tree)
-            
-            for name, line in detector.get_unused():
-                result.unused_imports.append(
-                    UnusedImport(file=path, line=line, module=name)
-                )
-            
-            result.files_analyzed += 1
-        
-        return result
-    
     def _analyze_local(self, result: AnalysisResult) -> AnalysisResult:
         """로컬 파일 시스템에서 분석"""
         for py_file in self.root.rglob('*.py'):
