@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import shutil
 import urllib.request
+import json
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -118,15 +119,33 @@ class RepoAnalyzer:
     def _parse_github_url(self, url: str) -> tuple[str, str, str]:
         """GitHub URL에서 owner, repo, branch 추출"""
         # https://github.com/owner/repo/tree/branch
+        # https://github.com/owner/repo/tree/feature/something
         # https://github.com/owner/repo
         url = url.replace('.git', '')
         parts = url.split('github.com/')[-1].split('/')
         owner = parts[0]
         repo = parts[1]
-        branch = 'main'
+        branch = None
+        
         if len(parts) > 3 and parts[2] == 'tree':
-            branch = parts[3]
+            # tree/ 이후 전체를 branch로 (feature/something 같은 경우 처리)
+            branch = '/'.join(parts[3:])
+        
+        # branch가 없으면 기본 브랜치 확인
+        if not branch:
+            branch = self._get_default_branch(owner, repo)
+        
         return owner, repo, branch
+    
+    def _get_default_branch(self, owner: str, repo: str) -> str:
+        """GitHub API로 기본 브랜치 확인"""
+        api_url = f"https://api.github.com/repos/{owner}/{repo}"
+        req = urllib.request.Request(api_url)
+        req.add_header('User-Agent', 'sweepy')
+        
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode())
+            return data.get('default_branch', 'main')
     
     def _fetch_github_files(self) -> list[tuple[str, str]]:
         """GitHub API로 Python 파일 목록과 내용 가져오기"""
@@ -134,7 +153,10 @@ class RepoAnalyzer:
         
         # 파일 트리 가져오기
         tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
-        with urllib.request.urlopen(tree_url) as response:
+        req = urllib.request.Request(tree_url)
+        req.add_header('User-Agent', 'sweepy')
+        
+        with urllib.request.urlopen(req) as response:
             tree_data = json.loads(response.read().decode())
         
         files = []
@@ -149,7 +171,10 @@ class RepoAnalyzer:
             
             # 파일 내용 가져오기
             raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
-            with urllib.request.urlopen(raw_url) as response:
+            req = urllib.request.Request(raw_url)
+            req.add_header('User-Agent', 'sweepy')
+            
+            with urllib.request.urlopen(req) as response:
                 content = response.read().decode('utf-8')
             files.append((path, content))
         
