@@ -32,6 +32,7 @@ class UnusedImport:
 @dataclass
 class AnalysisResult:
     repo_path: str
+    branch: str | None = None  # 추가
     unused_imports: list[UnusedImport] = field(default_factory=list)
     files_analyzed: int = 0
     files_skipped: int = 0
@@ -46,10 +47,14 @@ class AnalysisResult:
     def summary(self) -> str:
         lines = [
             f"Repository: {self.repo_path}",
+        ]
+        if self.branch:
+            lines.append(f"Branch: {self.branch}")
+        lines.extend([
             f"Files analyzed: {self.files_analyzed}",
             f"Files skipped: {self.files_skipped}",
             f"Unused imports: {len(self.unused_imports)}",
-        ]
+        ])
         return "\n".join(lines)
 
 
@@ -114,6 +119,17 @@ class RepoAnalyzer:
             'bitbucket.org' in path
         )
     
+    def _get_current_branch(self) -> str:
+        """clone된 레포의 현재 브랜치 확인"""
+        result = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=self.temp_dir,
+            capture_output=True,
+            text=True
+        )
+        return result.stdout.strip()
+    
+    
     def _parse_github_url(self, url: str) -> tuple[str, str, str | None]:
         """GitHub URL에서 owner, repo, branch 추출"""
         url = url.replace('.git', '')
@@ -166,6 +182,7 @@ class RepoAnalyzer:
         
         if self.is_remote:
             self.root = self._clone_repo(self.original_path)
+            result.branch = self._get_current_branch()
         else:
             self.root = Path(self.original_path).resolve()
         
